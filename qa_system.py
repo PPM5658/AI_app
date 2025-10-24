@@ -2,19 +2,38 @@
 # Handles interaction with the Gemini LLM
 # --- UPDATED WITH RESILIENT RETRY LOGIC ---
 
+import os
+import random  # <-- 2. ADDED
+import time  # <-- 1. ADDED
+
 import google.generativeai as genai
-from google.colab import userdata
+from google.api_core import exceptions as google_exceptions  # <-- 3. ADDED
+
+try:  # Provide compatibility outside Google Colab
+    from google.colab import userdata
+except ImportError:  # pragma: no cover - optional dependency
+    userdata = None
+
 import config
 from config import GEMINI_API_KEY as CONFIG_API_KEY
-import os
-import time  # <-- 1. ADDED
-import random  # <-- 2. ADDED
-from google.api_core import exceptions as google_exceptions  # <-- 3. ADDED
 
 class QASystem:
     def __init__(self):
         # 1. Retrieve API key
-        api_key = userdata.get('gemini') or CONFIG_API_KEY
+        colab_key = None
+        if userdata is not None:
+            try:
+                colab_key = userdata.get("gemini")
+            except Exception:
+                colab_key = None
+
+        env_key = os.getenv("GEMINI_API_KEY")
+        api_key = colab_key or env_key or CONFIG_API_KEY
+
+        if not api_key:
+            raise ValueError(
+                "No Gemini API key provided. Set GEMINI_API_KEY in the environment or config."
+            )
 
         # ... (your placeholder check logic can stay here) ...
         

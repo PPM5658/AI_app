@@ -2,24 +2,45 @@
 # Runs file processing and Q&A in parallel threads.
 
 import config
-from VideoProcessor import VideoProcessor
+from video_processor import VideoProcessor
 from memory_bank import MemoryBank
 from ultralytics import YOLO
 from qa_system import QASystem
 import threading
 
-def run_video_processing(processor, memory, model, stop_event, video_done_event):
+def run_video_processing(
+    processor,
+    memory,
+    model,
+    stop_event,
+    video_done_event,
+    video_path=None,
+    progress_callback=None,
+):
     """
     This function runs in a separate thread.
-    It processes the video file.
+    It processes the video file and streams new memories to an optional callback.
     """
-    print("Video thread started: Processing video file...")
-    
+    active_video_path = video_path or config.VIDEO_PATH
+    print(f"Video thread started: Processing video file '{active_video_path}'...")
+
     try:
         # We loop through the generator and feed the results to the memory bank
-        for frame, timestamp, results in processor.process_video(config.VIDEO_PATH):
-            memory.add_frame_memories(results, timestamp, model)
-    
+        for frame, timestamp, results in processor.process_video(
+            active_video_path, stop_event=stop_event
+        ):
+            new_memories = memory.add_frame_memories(results, timestamp, model)
+
+            if progress_callback and new_memories:
+                try:
+                    progress_callback(timestamp, new_memories)
+                except Exception as callback_error:
+                    print(f"Warning: progress callback raised an error: {callback_error}")
+
+            if stop_event.is_set():
+                print("Stop signal received. Exiting video processing thread loop.")
+                break
+
     except Exception as e:
         if not stop_event.is_set(): # Only log error if it wasn't a manual quit
             print(f"Error in video thread: {e}")
