@@ -33,15 +33,20 @@ class VideoProcessor:
                 return distance_m
         return None # Return None if class is unknown or width is 0
     
-    def process_video(self, video_path):
+    def process_video(self, video_path, stop_event=None):
         """
         Processes a video file frame by frame using YOLO tracking.
         Applies frame skipping for performance.
-        
+
         Yields:
             tuple: (frame, timestamp_sec, tracks)
                    'tracks' is an 8-column numpy array:
                    [x1, y1, x2, y2, track_id, class_id, confidence, distance_m]
+
+        Args:
+            video_path (str): Path to the video file to process.
+            stop_event (threading.Event | None): Optional event that, when set,
+                stops the generator gracefully.
         """
         try:
             cap = cv2.VideoCapture(video_path)
@@ -62,6 +67,9 @@ class VideoProcessor:
             
             with tqdm(total=total_frames, desc="Processing Video") as pbar:
                 while cap.isOpened():
+                    if stop_event is not None and stop_event.is_set():
+                        print("Stop signal received. Ending video processing loop.")
+                        break
                     success, frame = cap.read()
                     if not success:
                         break
@@ -125,7 +133,8 @@ class VideoProcessor:
                     frame_count += 1
 
         except Exception as e:
-            print(f"Error in video thread processing: {e}")
+            if stop_event is None or not stop_event.is_set():
+                print(f"Error in video thread processing: {e}")
         finally:
             cap.release()
             print("Video processing complete.")

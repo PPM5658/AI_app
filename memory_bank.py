@@ -70,7 +70,7 @@ class MemoryBank:
             new_memory_ids = []
 
             if not tracks.any():
-                return
+                return []
 
             for track in tracks:
                 try:
@@ -105,6 +105,8 @@ class MemoryBank:
                 
                 ids_array = np.array(new_memory_ids).astype('int64')
                 self.index.add_with_ids(embeddings, ids_array)
+
+            return new_memories_text
             
     def search_memories(self, query, k=5):
         """
