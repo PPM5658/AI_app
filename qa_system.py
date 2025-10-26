@@ -1,158 +1,160 @@
 # qa_system.py
-# Handles interaction with the Gemini LLM
-# --- UPDATED WITH RESILIENT RETRY LOGIC ---
+# --------------------------------------------------------------------
+# Handles Gemini-based text Q&A and integrates with VideoProcessor for
+# multi-object visual highlighting, distance display, retry logic,
+# and Drive auto-save for captured highlights.
+# --------------------------------------------------------------------
 
 import os
-import random  # <-- 2. ADDED
-import time  # <-- 1. ADDED
-
+import re
+import time
+import shutil
 import google.generativeai as genai
-from google.api_core import exceptions as google_exceptions  # <-- 3. ADDED
+from google.api_core import exceptions as google_exceptions
 
-try:  # Provide compatibility outside Google Colab
+try:
     from google.colab import userdata
-except ImportError:  # pragma: no cover - optional dependency
+except ImportError:
     userdata = None
 
 import config
 from config import GEMINI_API_KEY as CONFIG_API_KEY
 
+
 class QASystem:
-    def __init__(self):
-        # 1. Retrieve API key
+    def __init__(self, video_processor=None):
+        self.video_processor = video_processor
+
+        # ---------------- Gemini API Setup ----------------
         colab_key = None
         if userdata is not None:
             try:
                 colab_key = userdata.get("gemini")
             except Exception:
-                colab_key = None
+                pass
 
         env_key = os.getenv("GEMINI_API_KEY")
         api_key = colab_key or env_key or CONFIG_API_KEY
-
         if not api_key:
-            raise ValueError(
-                "No Gemini API key provided. Set GEMINI_API_KEY in the environment or config."
-            )
+            raise ValueError("No Gemini API key found.")
 
-        # ... (your placeholder check logic can stay here) ...
-        
-        # 3. Assign to instance
+        genai.configure(api_key=api_key)
         self.api_key = api_key
 
-        # 4. Configure Gemini client
-        try:
-            genai.configure(api_key=self.api_key)
-        except Exception as e:
-            raise ValueError(f"Failed to configure Gemini client. Verify API key. Error: {e}")
-
-        # 5. Generation config
-        self.generation_config = {
-            "temperature": 0.2,
-            "top_p": 1,
-            "top_k": 1,
-            "max_output_tokens": 2048,
-        }
-
-        # 6. Safety settings
-        self.safety_settings = [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-        ]
-
-        # 7. Load model
-        model_name = getattr(config, "GEMINI_MODEL", "gemini-pro-latest")
         self.model = genai.GenerativeModel(
-            model_name=model_name,
-            generation_config=self.generation_config,
-            safety_settings=self.safety_settings,
+            model_name=getattr(config, "GEMINI_MODEL", "gemini-pro-latest"),
+            generation_config={
+                "temperature": 0.2,
+                "top_p": 1,
+                "max_output_tokens": 2048
+            },
+            safety_settings=[
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ],
         )
+        print("✅ Gemini model initialized with multi-object visual support.")
 
-        print(f"✅ Gemini model '{model_name}' loaded successfully.")
-
-    # --- 4. NEW PRIVATE METHOD WITH RETRY LOGIC ---
+    # ------------------------------------------------------------
+    # Helper: Retry Gemini requests safely (with 429 fallback)
+    # ------------------------------------------------------------
     def _generate_with_retry(self, prompt_parts):
-        """
-        Calls the Gemini API with exponential backoff and retry logic.
-        """
-        max_retries = 3
-        base_wait_time = 2  # Start with 2 seconds
-        
-        for i in range(max_retries):
+        """Generate content with retry and fallback handling."""
+        for attempt in range(3):
             try:
-                # --- This is your API call ---
-                response = self.model.generate_content(prompt_parts)
-                return response.text  # Success!
-                # -------------------------------
-
-            except google_exceptions.ResourceExhausted as e:  # This is the 429 Error
-                print(f"WARNING: Rate limit hit (429). Attempt {i+1}/{max_retries}.")
-                if i == max_retries - 1:
-                    print("ERROR: Max retries exceeded for 429 error.")
-                    # This is the "human-like" response
-                    return "I'm currently experiencing a high volume of requests. Please try again in a moment."
-                
-                # Exponential backoff: 2s, 4s, 8s... + random "jitter"
-                wait_time = (base_wait_time ** (i + 1)) + random.uniform(0, 1)
-                print(f"Retrying in {wait_time:.2f} seconds...")
-                time.sleep(wait_time)
-
-            except (google_exceptions.InternalServerError, google_exceptions.ServiceUnavailable) as e:  # These are 500/503 Errors
-                print(f"WARNING: Gemini server error ({e}). Attempt {i+1}/{max_retries}.")
-                if i == max_retries - 1:
-                    print("ERROR: Max retries exceeded for 5xx error.")
-                    # This is the "human-like" response
-                    return "I'm sorry, the generative AI service I rely on seems to be having a temporary issue. Please try again in a few minutes."
-                
-                # Wait and retry
-                wait_time = (base_wait_time ** i) + random.uniform(0, 1)
-                print(f"Retrying in {wait_time:.2f} seconds...")
-                time.sleep(wait_time)
-
+                return self.model.generate_content(prompt_parts).text
+            except google_exceptions.ResourceExhausted:
+                print(f"⚠️ Rate limit, retrying ({attempt+1}/3)...")
+                time.sleep(2 ** (attempt + 1))
+            except google_exceptions.ServiceUnavailable:
+                print(f"⚠️ Gemini API temporarily unavailable, retrying ({attempt+1}/3)...")
+                time.sleep(1)
+            except google_exceptions.GoogleAPIError as e:
+                if "429" in str(e) or "quota" in str(e).lower():
+                    print("⚠️ Gemini quota exceeded — using fallback text mode.")
+                    return (
+                        "Gemini quota limit reached. Visual analysis completed, "
+                        "but text reasoning is temporarily unavailable."
+                    )
+                raise
             except Exception as e:
-                # Catch all other unexpected errors
-                print(f"ERROR: An unexpected error occurred: {e}")
-                return "I'm sorry, an unexpected error occurred while processing your request."
+                print(f"Unexpected Gemini error: {e}")
+                return "An unexpected error occurred."
+        return "Gemini API unavailable after multiple retries."
 
-        # Fallback in case loop finishes without returning
-        return "I'm sorry, I had a problem generating an answer after several attempts."
+    # ------------------------------------------------------------
+    # Extract multiple labels from user query
+    # ------------------------------------------------------------
+    def _extract_object_labels(self, query):
+        """Find all YOLO class names mentioned in the user's question."""
+        if not self.video_processor:
+            return []
+        yolo_labels = [n.lower() for n in self.video_processor.model.names.values()]
+        found = [lbl for lbl in yolo_labels if re.search(rf"\b{re.escape(lbl)}\b", query.lower())]
+        return list(set(found))
 
-    # --- 5. UPDATED get_answer METHOD ---
-
+    # ------------------------------------------------------------
+    # Main Q&A pipeline
+    # ------------------------------------------------------------
     def get_answer(self, query, context_texts_with_scores):
-        """Generates an answer using Gemini based on the query and retrieved context."""
-        
-        # --- THIS IS THE NEW LOGIC ---
-        # We set a threshold for L2 distance. You MUST tune this value.
-        # Start with something like 1.0.
-        MIN_SIMILARITY_THRESHOLD = 0.2
-        
-        relevant_memories = []
-        for text, score in context_texts_with_scores:
-            # --- INVERT THE CHECK ---
-            if score >= MIN_SIMILARITY_THRESHOLD:
-                relevant_memories.append(text)
-            else:
-                # This log is crucial for debugging your threshold!
-                print(f"DEBUG: Discarding memory (score {score:.2f} < {MIN_SIMILARITY_THRESHOLD}): '{text}'")
-        # --- END OF NEW LOGIC ---
-
-        if not relevant_memories:
-            return "I've scanned the video, but I haven't found any information related to that specific question yet."
-
-        context_prompt = "\n".join(relevant_memories)
-
-        context_prompt = "\n".join(relevant_memories) # <-- Use the filtered list
-        prompt_parts = [
-            "You are a video analysis assistant. Your memory consists of the following events from a video. "
-            "Answer the user's question based *only* on these memories. "
-            "If the memories don't provide an answer, say so.\n\n"
-            "--- MEMORY CONTEXT ---",
-            context_prompt,
-            "--- END OF MEMORY ---",
-            f"\nUser Question: \"{query}\"",
+        """
+        Generate both text and image-based answer.
+        Includes highlight retry and Drive auto-save.
+        """
+        relevant_memories = [
+            text for text, score in context_texts_with_scores if score >= 0.2
         ]
 
-        return self._generate_with_retry(prompt_parts)
+        labels = self._extract_object_labels(query)
+        image_path = None
+
+        # 1️⃣ Capture visual highlight (with retry)
+        if labels and self.video_processor:
+            try:
+                image_path, err = self.video_processor.capture_highlight(labels)
+                if err or image_path is None:
+                    print("[Visual Q&A] Highlight unavailable yet. Retrying in 1s...")
+                    time.sleep(1)
+                    image_path, err = self.video_processor.capture_highlight(labels)
+                    if err:
+                        print(f"[Visual Q&A] Retry highlight skipped: {err}")
+                        image_path = None
+                    elif image_path:
+                        print("[Visual Q&A] Highlight capture successful on retry.")
+            except Exception as e:
+                print(f"[Visual Q&A] Highlight failed: {e}")
+                image_path = None
+
+        # 2️⃣ Auto-save highlight to Google Drive
+        if image_path and os.path.exists(image_path):
+            drive_dir = "/content/drive/MyDrive/ObjectTrackingCaptures"
+            try:
+                if os.path.exists("/content/drive/MyDrive"):
+                    os.makedirs(drive_dir, exist_ok=True)
+                    dest = os.path.join(drive_dir, os.path.basename(image_path))
+                    shutil.copy(image_path, dest)
+                    print(f"📂 Highlight also saved to Drive: {dest}")
+            except Exception as e:
+                print(f"⚠️ Drive sync failed: {e}")
+
+        # 3️⃣ Generate Gemini text answer
+        if not relevant_memories:
+            text_answer = "I don't have enough context about that yet."
+        else:
+            prompt = (
+                "You are an intelligent video assistant.\n"
+                "Use the memory logs to answer the question accurately.\n"
+                "If distances are relevant, include them in your explanation.\n\n"
+                f"--- CONTEXT ---\n{chr(10).join(relevant_memories)}\n"
+                f"--- QUESTION ---\n{query}\n"
+            )
+            text_answer = self._generate_with_retry([prompt])
+
+        # 4️⃣ Package results
+        return {
+            "text_answer": text_answer,
+            "image_path": image_path,
+            "object_labels": labels,
+        }
